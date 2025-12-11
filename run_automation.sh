@@ -35,6 +35,7 @@ FIX_WINDOWS=true
 RUN_SIMULATIONS=true
 SPECIFIC_LIGANDS=""
 SKIP_VALIDATION=false
+SKIP_PERMISSION_FIX=false
 
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
@@ -53,6 +54,10 @@ parse_arguments() {
                 ;;
             --skip-validation)
                 SKIP_VALIDATION=true
+                shift
+                ;;
+            --skip-permission-fix)
+                SKIP_PERMISSION_FIX=true
                 shift
                 ;;
             --help)
@@ -79,6 +84,7 @@ Options:
   --run-only          Skip fixing phase, only run simulations (assumes already fixed)
   --ligands "lig1 lig2 ..."  Process only specific ligands (space-separated)
   --skip-validation   Skip pre-flight validation checks (not recommended)
+  --skip-permission-fix  Skip automatic permission fixing (if hanging, use quick_fix_permissions.sh first)
   --help              Show this help message
 
 Examples:
@@ -135,9 +141,15 @@ validate_environment() {
     
     print_header "Validating Environment"
     
-    # Detect and validate base directory
-    if ! detect_base_dir; then
-        print_error "Invalid directory structure"
+    # BASE_DIR should already be set by main()
+    if [ -z "$BASE_DIR" ]; then
+        print_error "BASE_DIR not initialized"
+        return 1
+    fi
+    
+    # Verify BASE_DIR exists
+    if [ ! -d "$BASE_DIR" ]; then
+        print_error "BASE_DIR does not exist: $BASE_DIR"
         return 1
     fi
     print_success "Base directory: $BASE_DIR"
@@ -215,6 +227,8 @@ phase_1_fixing() {
     fi
     echo ""
     
+    print_info "Starting n* window fixing process..."
+    
     # Run the fixer
     if ! fix_all_n_windows; then
         log_error "Failed to fix n* windows"
@@ -223,8 +237,8 @@ phase_1_fixing() {
     
     # Show statistics
     local stats=($(get_fix_statistics))
-    local fixed=${stats[0]}
-    local total=${stats[1]}
+    local fixed=${stats[0]:-0}
+    local total=${stats[1]:-0}
     
     echo ""
     print_success "Phase 1 complete: $fixed/$total rest/n* windows fixed"
@@ -352,14 +366,36 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
     
+    # Initialize BASE_DIR FIRST (before any logging or directory creation)
+    if [ -z "$BASE_DIR" ]; then
+        BASE_DIR="$(pwd)"
+    fi
+    
+    # If we're in fe/ directory, use it; otherwise look for fe/ subdirectory
+    if [ "$(basename "$BASE_DIR")" = "fe" ]; then
+        # Already in fe/ - good
+        export BASE_DIR
+    elif [ -d "$BASE_DIR/fe" ]; then
+        # Found fe/ subdirectory - use it
+        BASE_DIR="$BASE_DIR/fe"
+        export BASE_DIR
+    else
+        # Not in fe/ and no fe/ subdirectory found
+        echo "ERROR: Not in fe/ directory and fe/ subdirectory not found"
+        echo "Current directory: $(pwd)"
+        echo "Please run from BAT root directory (parent of fe/) or from fe/ itself"
+        exit 1
+    fi
+    
     # Print banner
     print_header "BAT Automation Package"
     echo "Comprehensive DD Simulation Automation"
     echo ""
     echo "Started: $(get_timestamp)"
+    echo "Working directory: $BASE_DIR"
     echo ""
     
-    # Setup
+    # Setup (BASE_DIR is now set)
     setup_logging
     setup_signal_handlers
     preserve_environment
@@ -381,7 +417,13 @@ main() {
     setup_tracking_dir
     
     # Fix permissions on all run-local.bash files
-    fix_all_permissions
+    if [ "$SKIP_PERMISSION_FIX" = "false" ]; then
+        fix_all_permissions
+    else
+        print_warning "Skipping permission fix as requested"
+        print_info "Make sure run-local.bash files are executable!"
+        echo ""
+    fi
     
     # Phase 1: Fix n* windows
     if [ "$FIX_WINDOWS" = "true" ]; then

@@ -43,16 +43,43 @@ fi
 ################################################################################
 
 setup_logging() {
+    # Validate BASE_DIR is set
+    if [ -z "$BASE_DIR" ]; then
+        echo "ERROR: BASE_DIR not set before setup_logging"
+        exit 1
+    fi
+    
     # Create log directory if it doesn't exist
     local log_path="${BASE_DIR}/${LOG_DIR}"
-    mkdir -p "$log_path"
+    
+    # Ensure we're not trying to create at root
+    if [ "$log_path" = "/logs" ] || [ "$log_path" = "/${LOG_DIR}" ]; then
+        echo "ERROR: Invalid log path: $log_path"
+        echo "BASE_DIR appears to be empty or '/'"
+        echo "BASE_DIR: '$BASE_DIR'"
+        exit 1
+    fi
+    
+    mkdir -p "$log_path" 2>/dev/null || {
+        echo "ERROR: Cannot create log directory: $log_path"
+        echo "Please check permissions and BASE_DIR setting"
+        echo "BASE_DIR: $BASE_DIR"
+        exit 1
+    }
     
     # Initialize log files
-    touch "${log_path}/${MAIN_LOG}"
-    touch "${log_path}/${ERROR_LOG}"
+    touch "${log_path}/${MAIN_LOG}" || {
+        echo "ERROR: Cannot create log file: ${log_path}/${MAIN_LOG}"
+        exit 1
+    }
+    touch "${log_path}/${ERROR_LOG}" || {
+        echo "ERROR: Cannot create error log file: ${log_path}/${ERROR_LOG}"
+        exit 1
+    }
     
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========================================" >> "${log_path}/${MAIN_LOG}"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] BAT Automation Started" >> "${log_path}/${MAIN_LOG}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] BASE_DIR: $BASE_DIR" >> "${log_path}/${MAIN_LOG}"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========================================" >> "${log_path}/${MAIN_LOG}"
 }
 
@@ -177,21 +204,37 @@ detect_pmemd_cuda() {
 }
 
 detect_base_dir() {
+    # If BASE_DIR already set and valid, use it
+    if [ -n "$BASE_DIR" ] && [ -d "$BASE_DIR" ]; then
+        log_message "Using provided BASE_DIR: $BASE_DIR" "INFO"
+        export BASE_DIR
+        return 0
+    fi
+    
+    # Otherwise detect from current directory
     if [ -z "$BASE_DIR" ]; then
         BASE_DIR="$(pwd)"
     fi
     
-    # Ensure we're in or can find fe/ directory
-    if [ -d "$BASE_DIR/fe" ]; then
-        BASE_DIR="$BASE_DIR/fe"
-    elif [ "$(basename "$BASE_DIR")" != "fe" ]; then
-        log_error "Not in fe/ directory and fe/ subdirectory not found"
-        return 1
+    # If we're in fe/, use it directly
+    if [ "$(basename "$BASE_DIR")" = "fe" ]; then
+        export BASE_DIR
+        log_message "Base directory: $BASE_DIR" "INFO"
+        return 0
     fi
     
-    export BASE_DIR
-    log_message "Base directory: $BASE_DIR" "INFO"
-    return 0
+    # If fe/ exists as subdirectory, use it
+    if [ -d "$BASE_DIR/fe" ]; then
+        BASE_DIR="$BASE_DIR/fe"
+        export BASE_DIR
+        log_message "Base directory: $BASE_DIR" "INFO"
+        return 0
+    fi
+    
+    # Neither condition met
+    log_error "Not in fe/ directory and fe/ subdirectory not found"
+    log_error "Current directory: $(pwd)"
+    return 1
 }
 
 ################################################################################
@@ -199,10 +242,26 @@ detect_base_dir() {
 ################################################################################
 
 setup_tracking_dir() {
+    # Validate BASE_DIR is set
+    if [ -z "$BASE_DIR" ]; then
+        echo "ERROR: BASE_DIR not set before setup_tracking_dir"
+        exit 1
+    fi
+    
     local tracking_path="${BASE_DIR}/${TRACKING_DIR}"
     
+    # Ensure we're not trying to create at root
+    if [ "$tracking_path" = "/.automation_tracking" ] || [ "$tracking_path" = "/${TRACKING_DIR}" ]; then
+        echo "ERROR: Invalid tracking path: $tracking_path"
+        echo "BASE_DIR appears to be empty or '/'"
+        exit 1
+    fi
+    
     # Create tracking directory
-    mkdir -p "$tracking_path"
+    mkdir -p "$tracking_path" || {
+        log_error "Cannot create tracking directory: $tracking_path"
+        return 1
+    }
     
     # Initialize tracking files
     touch "${tracking_path}/${JOB_QUEUE_FILE}"
@@ -242,10 +301,24 @@ preserve_environment() {
 
 fix_all_permissions() {
     local fixed_count=0
+    local start_time=$(date +%s)
     
     log_message "Fixing permissions on run-local.bash files..." "INFO"
+    print_info "Fixing permissions on run-local.bash files..."
     
     # Find all run-local.bash files and make them executable
+    # Use a more efficient approach with explicit error handling
+    local file_list=$(find "$BASE_DIR" -type f -name "run-local.bash" 2>/dev/null)
+    
+    if [ -z "$file_list" ]; then
+        log_message "No run-local.bash files found" "WARN"
+        print_warning "No run-local.bash files found in $BASE_DIR"
+        return 0
+    fi
+    
+    local total_files=$(echo "$file_list" | wc -l)
+    log_message "Found $total_files run-local.bash files" "INFO"
+    
     while IFS= read -r file; do
         if [ ! -x "$file" ]; then
             chmod +x "$file" 2>/dev/null
@@ -253,13 +326,16 @@ fix_all_permissions() {
                 ((fixed_count++))
                 log_message "Fixed: $file" "DEBUG"
             else
-                log_error "Failed to fix permissions: $file"
+                log_warning "Failed to fix permissions: $file"
             fi
         fi
-    done < <(find "$BASE_DIR" -name "run-local.bash" 2>/dev/null)
+    done <<< "$file_list"
     
-    log_message "Fixed permissions on $fixed_count files" "INFO"
-    print_success "Fixed permissions on $fixed_count run-local.bash files"
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    log_message "Fixed permissions on $fixed_count/$total_files files in ${duration}s" "INFO"
+    print_success "Fixed permissions on $fixed_count files (${duration}s)"
 }
 
 ################################################################################
